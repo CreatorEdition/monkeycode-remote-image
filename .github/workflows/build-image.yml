@@ -1,0 +1,122 @@
+name: 构建并发布镜像
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/creatoredition/monkeycode-remote-image
+
+jobs:
+  publish:
+    name: 验证并发布 linux/amd64
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 检查 Dockerfile
+        uses: hadolint/hadolint-action@2a66e89f53d0771bb131a7fa31f3136336094aa6 # v3.4.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+
+      - name: 检查 Shell 脚本
+        run: |
+          shellcheck scripts/*.sh
+          for script in scripts/*.sh; do
+            sh -n "$script"
+          done
+
+      - name: 设置 Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: 登录 GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成镜像元数据
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long,prefix=sha-
+            type=schedule,pattern={{date 'YYYYMMDD'}}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=MonkeyCode remote workspace with latest Node.js LTS and cloudflared
+
+      - name: 构建并载入待发布镜像
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          pull: true
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
+
+      - name: 运行待发布镜像冒烟测试
+        env:
+          TEST_IMAGE: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+        run: docker run --rm -i --entrypoint /bin/sh "$TEST_IMAGE" -s < scripts/ci-image-smoke-test.sh
+
+      - name: 推送已验证镜像
+        id: publish
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          CANONICAL_IMAGE: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker push "$CANONICAL_IMAGE"
+          printf '%s\n' "$IMAGE_TAGS" | while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            case "$tag" in
+              "$CANONICAL_IMAGE"|"${IMAGE_NAME}:latest") continue ;;
+            esac
+            docker push "$tag"
+          done
+          if printf '%s\n' "$IMAGE_TAGS" | grep -Fxq "${IMAGE_NAME}:latest"; then
+            docker push "${IMAGE_NAME}:latest"
+          fi
+          digest="$(docker buildx imagetools inspect "$CANONICAL_IMAGE" | awk '$1 == "Digest:" { print $2; exit }')"
+          test -n "$digest"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+      - name: 写入构建摘要
+        run: |
+          {
+            echo '## MonkeyCode 镜像'
+            echo
+            echo '`'"${IMAGE_NAME}@${{ steps.publish.outputs.digest }}"'`'
+            echo
+            echo '请在确认 GHCR 匿名可拉取后，将以上 digest 绑定到 MonkeyCode。'
+          } >> "$GITHUB_STEP_SUMMARY"
