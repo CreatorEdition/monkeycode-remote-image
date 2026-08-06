@@ -1,0 +1,5 @@
+.teamwork/
+.env
+.env.*
+*.key
+*.pem
