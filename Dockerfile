@@ -45,6 +45,7 @@ RUN set -eux; \
     chmod 0755 /etc/cloudflared /etc/monkeycode-remote; \
     sshd -t; \
     rm -f /etc/ssh/ssh_host_*; \
+    rm -f /usr/local/bin/yarn /usr/local/bin/yarnpkg /usr/local/bin/pnpm /usr/local/bin/pnpx; \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*; \
     if command -v corepack >/dev/null 2>&1; then corepack enable; fi; \
     node --version; \
