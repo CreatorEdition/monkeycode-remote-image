@@ -29,7 +29,7 @@ RUN set -eux; \
         iproute2 \
         iputils-ping \
         jq \
-        netcat-openbsd \
+        openssh-client \
         openssh-server \
         python3-venv \
         rsync \
